@@ -19,6 +19,8 @@ S = {
     'running': True,
     'frame': None,
     'frame_id': 0,
+    'depth_frame': None,
+    'depth_frame_id': 0,
     'pose': None,
     'path': [],
     'tracking_state': 'OFF',
@@ -49,6 +51,22 @@ def video_feed():
             with lock:
                 fid = S['frame_id']
                 frame = S['frame'] if fid != last_id else None
+            if frame:
+                last_id = fid
+                yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
+            else:
+                time.sleep(0.016)
+    return Response(gen(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/depth_feed')
+def depth_feed():
+    def gen():
+        last_id = -1
+        while True:
+            with lock:
+                fid = S['depth_frame_id']
+                frame = S['depth_frame'] if fid != last_id else None
             if frame:
                 last_id = fid
                 yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
@@ -116,7 +134,23 @@ def encode_loop(raw_queue):
                 S['frame_id'] += 1
 
 
-def camera_loop(raw_queue):
+def encode_depth_loop(depth_queue):
+    while True:
+        with lock:
+            if not S['running']:
+                break
+        try:
+            img = depth_queue.get(timeout=1.0)
+        except:
+            continue
+        ret, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        if ret:
+            with lock:
+                S['depth_frame'] = jpeg.tobytes()
+                S['depth_frame_id'] += 1
+
+
+def camera_loop(raw_queue, depth_queue):
     global zed
     zed = sl.Camera()
 
@@ -148,6 +182,7 @@ def camera_loop(raw_queue):
 
     runtime = sl.RuntimeParameters(confidence_threshold=30)
     image = sl.Mat()
+    depth = sl.Mat()
     zpose = sl.Pose()
     sensors = sl.SensorsData()
     fpc = sl.FusedPointCloud()
@@ -202,6 +237,18 @@ def camera_loop(raw_queue):
             raw_queue.put_nowait(image.get_data())
         except:
             pass
+
+        if frame_count % 2 == 0:
+            zed.retrieve_measure(depth, sl.MEASURE.DEPTH)
+            try:
+                d = depth.get_data()
+                if d.size > 0:
+                    d_norm = np.clip(d / 5.0, 0, 1) * 255
+                    d_8u = d_norm.astype(np.uint8)
+                    d_color = cv2.applyColorMap(d_8u, cv2.COLORMAP_TURBO)
+                    depth_queue.put_nowait(d_color)
+            except:
+                pass
 
         track_state = zed.get_position(zpose)
         trans = zpose.get_translation().get()
@@ -281,11 +328,14 @@ def main():
     signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
 
     raw_queue: "Queue[np.ndarray]" = Queue(maxsize=2)
+    depth_queue: "Queue[np.ndarray]" = Queue(maxsize=2)
 
-    t1 = threading.Thread(target=camera_loop, args=(raw_queue,), daemon=True)
+    t1 = threading.Thread(target=camera_loop, args=(raw_queue, depth_queue), daemon=True)
     t2 = threading.Thread(target=encode_loop, args=(raw_queue,), daemon=True)
+    t3 = threading.Thread(target=encode_depth_loop, args=(depth_queue,), daemon=True)
     t1.start()
     t2.start()
+    t3.start()
 
     time.sleep(2)
     app.run(host=HOST, port=PORT, threaded=True, debug=False)

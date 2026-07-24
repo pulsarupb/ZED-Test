@@ -23,10 +23,13 @@ body{background:#111;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;over
 .status-dot.yellow{background:#ff9800}
 .status-dot.red{background:#f44336}
 .status-dot.gray{background:#666}
-#main{display:grid;grid-template-columns:3fr 2fr;gap:0;overflow:hidden}
+#main{display:grid;grid-template-columns:2fr 2fr 3fr;gap:0;overflow:hidden}
 #video-panel{position:relative;background:#000;overflow:hidden}
 #video-panel img{width:100%;height:100%;object-fit:contain}
 #video-overlay{position:absolute;bottom:8px;left:8px;font-size:12px;font-family:monospace;background:rgba(0,0,0,0.7);padding:6px 10px;border-radius:4px;pointer-events:none}
+#depth-panel{position:relative;background:#000;overflow:hidden}
+#depth-panel img{width:100%;height:100%;object-fit:contain}
+#depth-overlay{position:absolute;bottom:8px;left:8px;font-size:12px;font-family:monospace;background:rgba(0,0,0,0.7);padding:6px 10px;border-radius:4px;pointer-events:none}
 #scene-panel{position:relative;background:#1a1a1a;overflow:hidden}
 #scene-panel canvas{display:block}
 #bottombar{background:#1a1a2e;padding:8px 16px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;font-size:13px;font-family:monospace}
@@ -35,7 +38,7 @@ body{background:#111;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;over
 #btn-reset{background:#ff9800;color:#fff}
 #btn-reset:hover{background:#f57c00}
 .ml-auto{margin-left:auto}
-@media(max-width:800px){ #main{grid-template-columns:1fr;grid-template-rows:1fr 1fr}}
+@media(max-width:1000px){ #main{grid-template-columns:1fr;grid-template-rows:1fr 1fr 1fr}}
 </style>
 </head>
 <body>
@@ -49,6 +52,10 @@ body{background:#111;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;over
     <div id="video-panel">
       <img id="video-feed" src="/video_feed" alt="Camera feed">
       <div id="video-overlay"></div>
+    </div>
+    <div id="depth-panel">
+      <img id="depth-feed" src="/depth_feed" alt="Depth feed">
+      <div id="depth-overlay">depth (0–5m)</div>
     </div>
     <div id="scene-panel"></div>
   </div>
