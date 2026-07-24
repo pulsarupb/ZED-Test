@@ -1,0 +1,10 @@
+[project]
+name = "zed-slam-test"
+version = "0.1.0"
+description = "ZED 2i SLAM testing with web UI for headless Jetson"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.0",
+    "opencv-python>=4.8.0",
+    "numpy>=1.21,<2",
+]

@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZED 2i SLAM Test</title>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#111;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden;height:100vh}
+#app{display:grid;grid-template-rows:auto 1fr auto;height:100vh}
+#topbar{background:#1a1a2e;padding:8px 16px;display:flex;align-items:center;gap:16px}
+#topbar h1{font-size:16px;font-weight:600}
+.status-dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:4px}
+.status-dot.green{background:#4caf50}
+.status-dot.yellow{background:#ff9800}
+.status-dot.red{background:#f44336}
+.status-dot.gray{background:#666}
+#main{display:grid;grid-template-columns:3fr 2fr;gap:0;overflow:hidden}
+#video-panel{position:relative;background:#000;overflow:hidden}
+#video-panel img{width:100%;height:100%;object-fit:contain}
+#video-overlay{position:absolute;bottom:8px;left:8px;font-size:12px;font-family:monospace;background:rgba(0,0,0,0.7);padding:6px 10px;border-radius:4px;pointer-events:none}
+#scene-panel{position:relative;background:#1a1a1a;overflow:hidden}
+#scene-panel canvas{display:block}
+#bottombar{background:#1a1a2e;padding:8px 16px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;font-size:13px;font-family:monospace}
+#bottombar .stat{white-space:nowrap}
+#bottombar button{padding:6px 14px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600}
+#btn-reset{background:#ff9800;color:#fff}
+#btn-reset:hover{background:#f57c00}
+.ml-auto{margin-left:auto}
+@media(max-width:800px){ #main{grid-template-columns:1fr;grid-template-rows:1fr 1fr}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <h1>ZED 2i SLAM</h1>
+    <span id="camera-info">connecting...</span>
+    <span class="ml-auto" id="top-status"><span class="status-dot gray"></span>offline</span>
+  </div>
+  <div id="main">
+    <div id="video-panel">
+      <img id="video-feed" src="/video_feed" alt="Camera feed">
+      <div id="video-overlay"></div>
+    </div>
+    <div id="scene-panel"></div>
+  </div>
+  <div id="bottombar">
+    <span class="stat" id="stat-pose">pose: --</span>
+    <span class="stat" id="stat-imu">imu: --</span>
+    <span class="stat" id="stat-pc">pc: --</span>
+    <span class="ml-auto"></span>
+    <button id="btn-reset">Reset</button>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scenePanel = document.getElementById('scene-panel');
+const W = scenePanel.clientWidth;
+const H = scenePanel.clientHeight;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a1a);
+
+const camera = new THREE.PerspectiveCamera(50, W / H, 0.05, 500);
+camera.position.set(5, 4, 8);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+scenePanel.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.1;
+controls.update();
+
+const grid = new THREE.GridHelper(20, 20, 0x555555, 0x333333);
+scene.add(grid);
+
+const axesHelper = new THREE.AxesHelper(2);
+scene.add(axesHelper);
+
+const ambientLight = new THREE.AmbientLight(0x404040);
+scene.add(ambientLight);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(10, 20, 10);
+scene.add(dirLight);
+
+const camGroup = new THREE.Group();
+const frustumGeo = new THREE.ConeGeometry(0.15, 0.3, 4);
+frustumGeo.rotateX(-Math.PI / 2);
+const frustumMat = new THREE.MeshBasicMaterial({ color: 0x00ff88, wireframe: true });
+const frustumMesh = new THREE.Mesh(frustumGeo, frustumMat);
+frustumMesh.position.set(0, 0, -0.15);
+camGroup.add(frustumMesh);
+const camAxis = new THREE.AxesHelper(0.4);
+camGroup.add(camAxis);
+scene.add(camGroup);
+
+const trailMax = 3000;
+const trailPositions = new Float32Array(trailMax * 3);
+const trailGeo = new THREE.BufferGeometry();
+trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+trailGeo.setDrawRange(0, 0);
+const trailMat = new THREE.LineBasicMaterial({ color: 0x00ff88, linewidth: 2 });
+const trailLine = new THREE.Line(trailGeo, trailMat);
+scene.add(trailLine);
+let trailCount = 0;
+
+let pcObj = null;
+const pcMat = new THREE.PointsMaterial({ color: 0x33aaff, size: 0.04, sizeAttenuation: true });
+
+function buildPointCloud(verts) {
+  if (pcObj) { scene.remove(pcObj); pcObj.geometry.dispose(); pcObj = null; }
+  if (!verts || verts.length === 0) return;
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(verts.length * 3);
+  for (let i = 0; i < verts.length; i++) {
+    pos[i * 3] = verts[i][0];
+    pos[i * 3 + 1] = verts[i][1];
+    pos[i * 3 + 2] = verts[i][2];
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  pcObj = new THREE.Points(geo, pcMat);
+  scene.add(pcObj);
+}
+
+function updateTrail(path) {
+  const n = Math.min(path.length, trailMax);
+  for (let i = 0; i < n; i++) {
+    const p = path[i].translation;
+    trailPositions[i * 3] = p[0];
+    trailPositions[i * 3 + 1] = p[1];
+    trailPositions[i * 3 + 2] = p[2];
+  }
+  trailGeo.attributes.position.needsUpdate = true;
+  trailGeo.setDrawRange(0, n);
+  trailCount = n;
+}
+
+const videoOverlay = document.getElementById('video-overlay');
+const topStatus = document.getElementById('top-status');
+const cameraInfo = document.getElementById('camera-info');
+const statPose = document.getElementById('stat-pose');
+const statImu = document.getElementById('stat-imu');
+const statPc = document.getElementById('stat-pc');
+const btnReset = document.getElementById('btn-reset');
+
+btnReset.addEventListener('click', async () => {
+  await fetch('/reset', { method: 'POST' });
+});
+
+function updateUI(data) {
+  const ts = data.tracking_state || 'OFF';
+  const dot = topStatus.querySelector('.status-dot');
+  if (ts === 'OK') { dot.className = 'status-dot green'; topStatus.innerHTML = '<span class="status-dot green"></span>tracking OK'; }
+  else if (ts === 'SEARCHING') { dot.className = 'status-dot yellow'; topStatus.innerHTML = '<span class="status-dot yellow"></span>searching'; }
+  else { dot.className = 'status-dot red'; topStatus.innerHTML = '<span class="status-dot red"></span>' + ts; }
+
+  if (data.camera_ready) {
+    cameraInfo.textContent = data.camera_model + ' (S/N: ' + data.serial + ')';
+  }
+
+  if (data.pose) {
+    const t = data.pose.translation;
+    statPose.textContent = 'pose: x:' + t[0].toFixed(2) + ' y:' + t[1].toFixed(2) + ' z:' + t[2].toFixed(2);
+  }
+
+  if (data.imu) {
+    const a = data.imu.acceleration;
+    const g = data.imu.angular_velocity;
+    statImu.textContent = 'imu: a:[' + a[0].toFixed(1) + ',' + a[1].toFixed(1) + ',' + a[2].toFixed(1) + '] g:[' + g[0].toFixed(1) + ',' + g[1].toFixed(1) + ',' + g[2].toFixed(1) + ']';
+  }
+
+  statPc.textContent = 'pc: ' + data.mapping_state + (data.mapping_active ? ' (active)' : '');
+  videoOverlay.textContent = 'fps: ' + data.fps + ' | tracking: ' + ts + ' | path: ' + data.path_length;
+}
+
+async function pollStatus() {
+  try {
+    const r = await fetch('/status');
+    const data = await r.json();
+    updateUI(data);
+
+    if (data.pose) {
+      const t = data.pose.translation;
+      const q = data.pose.orientation;
+      camGroup.position.set(t[0], t[1], t[2]);
+      camGroup.quaternion.set(q[0], q[1], q[2], q[3]);
+      camGroup.updateMatrix();
+    }
+  } catch (e) {}
+}
+
+async function pollPath() {
+  try {
+    const r = await fetch('/path');
+    const path = await r.json();
+    updateTrail(path);
+  } catch (e) {}
+}
+
+async function pollPc() {
+  try {
+    const r = await fetch('/pc');
+    const data = await r.json();
+    if (data.vertices && data.vertices.length > 0) {
+      buildPointCloud(data.vertices);
+    }
+  } catch (e) {}
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+function onResize() {
+  const w = scenePanel.clientWidth;
+  const h = scenePanel.clientHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+
+window.addEventListener('resize', onResize);
+
+setInterval(pollStatus, 500);
+setInterval(pollPath, 1000);
+setInterval(pollPc, 2000);
+pollStatus();
+pollPath();
+animate();
+</script>
+</body>
+</html>
