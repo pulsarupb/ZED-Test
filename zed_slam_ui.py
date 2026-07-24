@@ -99,8 +99,8 @@ def camera_loop():
     zed = sl.Camera()
 
     init = sl.InitParameters(
-        camera_resolution=sl.RESOLUTION.HD720,
-        depth_mode=sl.DEPTH_MODE.NEURAL,
+        camera_resolution=sl.RESOLUTION.VGA,
+        depth_mode=sl.DEPTH_MODE.NEURAL_LIGHT,
         coordinate_units=sl.UNIT.METER,
         coordinate_system=sl.COORDINATE_SYSTEM.RIGHT_HANDED_Z_UP,
         camera_disable_self_calib=False,
