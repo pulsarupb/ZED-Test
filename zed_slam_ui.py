@@ -1,3 +1,5 @@
+import json
+import os
 import threading
 import time
 import signal
@@ -13,6 +15,7 @@ from flask import Flask, Response, render_template, jsonify, request
 HOST = '0.0.0.0'
 PORT = 5000
 MAX_PATH = 3000
+SETTINGS_FILE = os.path.join(os.path.dirname(__file__), 'settings.json')
 
 lock = threading.Lock()
 S = {
@@ -38,14 +41,14 @@ S = {
         'init': {
             'camera_resolution': 'VGA',
             'camera_fps': 60,
-            'depth_mode': 'PERFORMANCE',
+            'depth_mode': 'NEURAL_LIGHT',
             'depth_minimum_distance': -1,
             'depth_maximum_distance': -1,
             'coordinate_units': 'METER',
             'coordinate_system': 'RIGHT_HANDED_Z_UP',
             'camera_disable_self_calib': False,
-            'camera_image_flip': 'OFF',
-            'depth_stabilization': 1,
+            'camera_image_flip': 'AUTO',
+            'depth_stabilization': 30,
             'enable_image_enhancement': True,
             'sensors_required': False,
         },
@@ -79,6 +82,42 @@ S = {
         },
     },
 }
+
+
+def save_settings():
+    with lock:
+        data = dict(S['cfg'])
+    try:
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[settings] save failed: {e}")
+
+
+def load_settings():
+    if not os.path.exists(SETTINGS_FILE):
+        return
+    try:
+        with open(SETTINGS_FILE) as f:
+            saved = json.load(f)
+    except Exception as e:
+        print(f"[settings] load failed: {e}")
+        return
+    with lock:
+        for section in ('init', 'runtime', 'tracking', 'mapping'):
+            if section in saved:
+                for key, value in saved[section].items():
+                    if key in S['cfg'].get(section, {}):
+                        cur_type = type(S['cfg'][section][key])
+                        if cur_type is int:
+                            value = int(value)
+                        elif cur_type is float:
+                            value = float(value)
+                        elif cur_type is bool and not isinstance(value, bool):
+                            value = str(value).lower() == 'true'
+                        S['cfg'][section][key] = value
+        print(f"[settings] loaded from {SETTINGS_FILE}")
+
 
 app = Flask(__name__)
 
@@ -160,13 +199,13 @@ def reset():
 def _settings_options():
     return {
         'init': {
-            'camera_resolution': [v for v in dir(sl.RESOLUTION) if v.isupper() and v not in ('LAST',)],
-            'camera_fps': [15, 30, 60, 100],
-            'depth_mode': [v for v in dir(sl.DEPTH_MODE) if v.isupper() and v not in ('LAST', 'CUSTOM')],
+            'camera_resolution': ['VGA', 'SVGA', 'HD720', 'HD1080', 'HD1200', 'HD2K', 'AUTO'],
+            'camera_fps': [0, 15, 30, 60, 100, 120],
+            'depth_mode': ['PERFORMANCE', 'QUALITY', 'ULTRA', 'NEURAL', 'NEURAL_LIGHT', 'NEURAL_PLUS', 'NONE'],
             'depth_minimum_distance': {'min': -1, 'max': 10, 'step': 0.1},
             'depth_maximum_distance': {'min': -1, 'max': 40, 'step': 0.5},
-            'coordinate_units': [v for v in dir(sl.UNIT) if v.isupper() and v != 'LAST'],
-            'coordinate_system': [v for v in dir(sl.COORDINATE_SYSTEM) if v.isupper() and v != 'LAST'],
+            'coordinate_units': ['MILLIMETER', 'CENTIMETER', 'METER', 'INCH', 'FOOT'],
+            'coordinate_system': ['IMAGE', 'LEFT_HANDED_Y_UP', 'LEFT_HANDED_Z_UP', 'RIGHT_HANDED_Y_UP', 'RIGHT_HANDED_Z_UP', 'RIGHT_HANDED_Z_UP_X_FWD'],
             'camera_disable_self_calib': 'bool',
             'camera_image_flip': [v for v in dir(sl.FLIP_MODE) if v.isupper()],
             'depth_stabilization': {'min': 0, 'max': 100, 'step': 1},
@@ -187,19 +226,66 @@ def _settings_options():
             'set_floor_as_origin': 'bool',
             'set_gravity_as_origin': 'bool',
             'depth_min_range': {'min': -1, 'max': 10, 'step': 0.1},
-            'mode': [v for v in dir(sl.POSITIONAL_TRACKING_MODE) if v.isupper()],
+            'mode': ['GEN_1', 'GEN_2', 'GEN_3'],
             'enable_area_memory': 'bool',
             'enable_2d_ground_mode': 'bool',
         },
         'mapping': {
-            'resolution': [v for v in dir(sl.MAPPING_RESOLUTION) if v.isupper()],
+            'resolution': ['LOW', 'MEDIUM', 'HIGH'],
             'range_meter': {'min': -1, 'max': 20, 'step': 0.5},
             'max_memory_usage': {'min': 256, 'max': 8192, 'step': 256},
-            'map_type': [v for v in dir(sl.SPATIAL_MAP_TYPE) if v.isupper() and v != 'LAST'],
+            'map_type': ['FUSED_POINT_CLOUD', 'MESH'],
             'save_texture': 'bool',
             'use_chunk_only': 'bool',
             'reverse_vertex_order': 'bool',
             'stability_counter': {'min': 0, 'max': 100, 'step': 1},
+        },
+    }
+
+
+def _settings_descriptions():
+    return {
+        'init': {
+            'camera_resolution': 'Sensor output resolution. Higher = more detail but lower max FPS and higher GPU load.',
+            'camera_fps': 'Target frame rate. 0 = auto-selects the maximum FPS for the chosen resolution.',
+            'depth_mode': 'Depth computation algorithm. NEURAL = best quality. NEURAL_LIGHT = Jetson-optimized. PERFORMANCE = fastest but deprecated. NONE disables depth.',
+            'depth_minimum_distance': 'Closest depth returned (-1 = camera default, typically ~0.3m). Cannot exceed 3m.',
+            'depth_maximum_distance': 'Farthest depth returned (-1 = camera default, up to 20m). Affects depth map range only.',
+            'coordinate_units': 'Unit for all spatial data: depth, point cloud, tracking, and mesh.',
+            'coordinate_system': 'Axis convention for positional tracking and 3D measures.',
+            'camera_disable_self_calib': 'Skip self-calibration on open. Disable for repeatable calibration across runs; keep enabled for best accuracy.',
+            'camera_image_flip': 'Flip images horizontally. AUTO uses IMU gravity to detect orientation. Use ON if camera is mounted upside-down.',
+            'depth_stabilization': 'Temporal depth smoothness (0=off, 100=max). Reduces flicker on low-texture surfaces. Enables positional tracking automatically when > 0.',
+            'enable_image_enhancement': 'Enhanced Contrast Technology via camera ISP (firmware 1523+). Improves image quality in low-light scenes.',
+            'sensors_required': 'Fail camera open if IMU sensors are not detected. Disable to use USB3-only cables without sensor connection.',
+        },
+        'runtime': {
+            'confidence_threshold': 'Depth confidence filter (0=strict, 100=permissive). Lower values remove noisy depth but may create holes.',
+            'texture_confidence_threshold': 'Texture-based confidence filter (0=strict, 200=permissive). Removes depth on low-texture areas.',
+            'enable_depth': 'Enable or disable depth map computation. Disabling saves GPU resources when depth is not needed.',
+            'remove_saturated_areas': 'Mask out overexposed (saturated) pixels from depth computation. Improves depth quality in bright scenes.',
+            'enable_fill_mode': 'Interpolate depth values in small holes and gaps. Produces denser depth maps at the cost of accuracy at object edges.',
+        },
+        'tracking': {
+            'enable_imu_fusion': 'Fuse IMU accelerometer/gyroscope data with visual odometry. Provides robust tracking during fast motion or low texture.',
+            'enable_pose_smoothing': 'Apply temporal smoothing to camera pose. Reduces jitter but adds a small latency to pose updates.',
+            'set_as_static': 'Optimize tracking for a stationary camera. Disables motion compensation, useful for fixed-mount setups.',
+            'set_floor_as_origin': 'Use detected floor plane as the world origin (Z=0 or Y=0). Must see the floor at startup.',
+            'set_gravity_as_origin': 'Align world frame with gravity using IMU. ZED 2i gravity direction is detected from IMU at startup.',
+            'depth_min_range': 'Minimum depth range for features used in tracking (-1 = auto). Reduces influence of very close objects.',
+            'mode': 'Tracking algorithm generation. GEN_3 = latest with best accuracy. GEN_1/GEN_2 = legacy modes for compatibility.',
+            'enable_area_memory': 'Remember visual landmarks across sessions for relocalization. Useful for returning to a previously mapped area.',
+            'enable_2d_ground_mode': 'Constrain tracking to a 2D ground plane (XZ or XY). For wheeled robots or vehicles on flat surfaces.',
+        },
+        'mapping': {
+            'resolution': 'Spatial mapping voxel resolution. LOW = faster, less detailed. HIGH = slower, more detailed mesh/point cloud.',
+            'range_meter': 'Maximum mapping range in meters (-1 = auto). Longer range captures more distant geometry but uses more memory.',
+            'max_memory_usage': 'Maximum memory budget for the spatial map in MB. Higher = more detail retained. Lower = chunks are recycled sooner.',
+            'map_type': 'Output representation. FUSED_POINT_CLOUD = lightweight 3D points. MESH = textured/solid surface reconstruction.',
+            'save_texture': 'Apply camera texture to mesh faces (MESH mode only). Produces visually rich models but increases memory and file size.',
+            'use_chunk_only': 'Only process the most recently updated map chunks. Reduces CPU load during live streaming of incremental updates.',
+            'reverse_vertex_order': 'Flip triangle winding for mesh faces. Needed if the mesh appears inside-out or has incorrect normals in your viewer.',
+            'stability_counter': 'Number of observations before a voxel is locked (0 = instant). Higher values reduce noise but delay map convergence.',
         },
     }
 
@@ -211,6 +297,7 @@ def settings():
             return jsonify({
                 'current': S['cfg'],
                 'options': _settings_options(),
+                'descriptions': _settings_descriptions(),
             })
     data = request.get_json(force=True)
     needs_restart = False
@@ -220,11 +307,12 @@ def settings():
                 continue
             for key, value in data[section].items():
                 if key in S['cfg'].get(section, {}):
-                    if section in ('init', 'mapping'):
+                    if section in ('init', 'tracking', 'mapping'):
                         needs_restart = True
                     S['cfg'][section][key] = value
         if needs_restart:
             S['settings_restart_pending'] = True
+    save_settings()
     return jsonify({'status': 'accepted', 'needs_restart': needs_restart})
 
 
@@ -234,7 +322,7 @@ zed = None
 def _init_params(cfg):
     init = sl.InitParameters(
         camera_resolution=getattr(sl.RESOLUTION, cfg['camera_resolution']),
-        camera_fps=cfg['camera_fps'],
+        camera_fps=int(cfg['camera_fps']),
         depth_mode=getattr(sl.DEPTH_MODE, cfg['depth_mode']),
         depth_minimum_distance=cfg['depth_minimum_distance'],
         depth_maximum_distance=cfg['depth_maximum_distance'],
@@ -437,6 +525,7 @@ def camera_loop(raw_queue, depth_queue):
                     d = depth.get_data()
                     if d.size > 0:
                         d_norm = np.clip(d / 5.0, 0, 1) * 255
+                        np.nan_to_num(d_norm, copy=False)
                         d_8u = d_norm.astype(np.uint8)
                         d_color = cv2.applyColorMap(d_8u, cv2.COLORMAP_TURBO)
                         depth_queue.put_nowait(d_color)
@@ -519,6 +608,8 @@ def camera_loop(raw_queue, depth_queue):
 def main():
     signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
     signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
+
+    load_settings()
 
     raw_queue: "Queue[np.ndarray]" = Queue(maxsize=2)
     depth_queue: "Queue[np.ndarray]" = Queue(maxsize=2)

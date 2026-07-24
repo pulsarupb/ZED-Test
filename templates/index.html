@@ -66,6 +66,8 @@ body{background:#111;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;over
 .section-body.open{display:block}
 .ctrl-row{display:flex;align-items:center;justify-content:space-between;padding:5px 0;min-height:30px}
 .ctrl-row .ctrl-label{font-size:12px;color:#aaa;white-space:nowrap}
+.ctrl-desc{font-size:10px;color:#666;line-height:1.3;padding:0 0 6px 0;border-bottom:1px solid #222;margin-bottom:4px}
+.ctrl-group{padding:4px 0}
 .ctrl-row select{background:#2a2a3a;color:#ccc;border:1px solid #444;border-radius:3px;padding:3px 6px;font-size:12px;max-width:180px}
 .ctrl-row input[type=range]{width:100px;accent-color:#4caf50}
 .ctrl-row .range-val{font-size:11px;color:#4caf50;min-width:32px;text-align:right;font-family:monospace}
@@ -275,6 +277,7 @@ const btnApplyAll = document.getElementById('btn-apply-all');
 
 let settingsCurrent = null;
 let settingsOptions = null;
+let settingsDescriptions = null;
 let pendingChanges = {};
 let changedSections = {};
 
@@ -305,7 +308,10 @@ function onControlChange(section, key, value) {
   btnApplyAll.disabled = !hasChanges;
 }
 
-function buildControl(section, key, value, options) {
+function buildControl(section, key, value, options, description) {
+  const group = document.createElement('div');
+  group.className = 'ctrl-group';
+
   const container = document.createElement('div');
   container.className = 'ctrl-row';
 
@@ -339,8 +345,8 @@ function buildControl(section, key, value, options) {
     });
     sel.addEventListener('change', () => {
       const v = sel.value;
-      const num = Number(v);
-      onControlChange(section, key, isNaN(num) || v.includes('.') ? (isNaN(num) ? v : num) : v);
+      const asNum = Number(v);
+      onControlChange(section, key, Number.isFinite(asNum) ? asNum : v);
     });
     control.appendChild(sel);
   } else if (typeof options === 'object' && 'min' in options) {
@@ -361,7 +367,16 @@ function buildControl(section, key, value, options) {
   }
 
   container.appendChild(control);
-  return container;
+  group.appendChild(container);
+
+  if (description) {
+    const desc = document.createElement('div');
+    desc.className = 'ctrl-desc';
+    desc.textContent = description;
+    group.appendChild(desc);
+  }
+
+  return group;
 }
 
 async function loadSettings() {
@@ -370,6 +385,7 @@ async function loadSettings() {
     const data = await r.json();
     settingsCurrent = data.current;
     settingsOptions = data.options;
+    settingsDescriptions = data.descriptions || {};
     pendingChanges = {};
     changedSections = {};
     btnApplyRuntime.disabled = true;
@@ -404,7 +420,10 @@ function renderSettings() {
     if (section === 'init') { body.classList.add('open'); header.querySelector('.arrow').classList.add('open'); }
 
     Object.keys(vals).forEach(key => {
-      if (opts[key]) body.appendChild(buildControl(section, key, vals[key], opts[key]));
+      if (opts[key]) {
+        const desc = (settingsDescriptions[section] || {})[key] || '';
+        body.appendChild(buildControl(section, key, vals[key], opts[key], desc));
+      }
     });
 
     sec.appendChild(header);

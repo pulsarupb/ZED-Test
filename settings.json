@@ -1,0 +1,44 @@
+{
+  "init": {
+    "camera_resolution": "VGA",
+    "camera_fps": 100,
+    "depth_mode": "NEURAL_LIGHT",
+    "depth_minimum_distance": -1,
+    "depth_maximum_distance": -1,
+    "coordinate_units": "METER",
+    "coordinate_system": "RIGHT_HANDED_Z_UP",
+    "camera_disable_self_calib": false,
+    "camera_image_flip": "AUTO",
+    "depth_stabilization": 30,
+    "enable_image_enhancement": true,
+    "sensors_required": false
+  },
+  "runtime": {
+    "confidence_threshold": 30,
+    "texture_confidence_threshold": 100,
+    "enable_depth": true,
+    "remove_saturated_areas": false,
+    "enable_fill_mode": false
+  },
+  "tracking": {
+    "enable_imu_fusion": true,
+    "enable_pose_smoothing": false,
+    "set_as_static": false,
+    "set_floor_as_origin": false,
+    "set_gravity_as_origin": true,
+    "depth_min_range": -1,
+    "mode": "GEN_3",
+    "enable_area_memory": true,
+    "enable_2d_ground_mode": false
+  },
+  "mapping": {
+    "resolution": "LOW",
+    "range_meter": -1,
+    "max_memory_usage": 2048,
+    "map_type": "FUSED_POINT_CLOUD",
+    "save_texture": false,
+    "use_chunk_only": true,
+    "reverse_vertex_order": false,
+    "stability_counter": 0
+  }
+}
