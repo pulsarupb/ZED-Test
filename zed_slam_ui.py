@@ -3,6 +3,8 @@ import time
 import signal
 import sys
 
+from queue import Queue
+
 import cv2
 import numpy as np
 import pyzed.sl as sl
@@ -94,13 +96,34 @@ def reset():
 zed = None
 
 
-def camera_loop():
+def encode_loop(raw_queue):
+    while True:
+        with lock:
+            if not S['running']:
+                break
+        try:
+            img = raw_queue.get(timeout=1.0)
+        except:
+            continue
+        if img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        else:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        ret, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 55])
+        if ret:
+            with lock:
+                S['frame'] = jpeg.tobytes()
+                S['frame_id'] += 1
+
+
+def camera_loop(raw_queue):
     global zed
     zed = sl.Camera()
 
     init = sl.InitParameters(
         camera_resolution=sl.RESOLUTION.VGA,
-        depth_mode=sl.DEPTH_MODE.NEURAL_LIGHT,
+        camera_fps=60,
+        depth_mode=sl.DEPTH_MODE.PERFORMANCE,
         coordinate_units=sl.UNIT.METER,
         coordinate_system=sl.COORDINATE_SYSTEM.RIGHT_HANDED_Z_UP,
         camera_disable_self_calib=False,
@@ -141,7 +164,7 @@ def camera_loop():
 
     sm = sl.SpatialMappingParameters(
         map_type=sl.SPATIAL_MAP_TYPE.FUSED_POINT_CLOUD,
-        resolution=sl.MAPPING_RESOLUTION.MEDIUM,
+        resolution=sl.MAPPING_RESOLUTION.LOW,
         max_memory_usage=2048,
         save_texture=False,
         use_chunk_only=True,
@@ -175,15 +198,10 @@ def camera_loop():
             continue
 
         zed.retrieve_image(image, sl.VIEW.LEFT)
-        img = image.get_data()
-        if img.shape[2] == 4:
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        else:
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        ret = True
-        jpeg = None
-        if frame_count % 2 == 0:
-            ret, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 55])
+        try:
+            raw_queue.put_nowait(image.get_data())
+        except:
+            pass
 
         track_state = zed.get_position(zpose)
         trans = zpose.get_translation().get()
@@ -212,9 +230,6 @@ def camera_loop():
         ox, oy, oz, ow = float(orient[0]), float(orient[1]), float(orient[2]), float(orient[3])
 
         with lock:
-            if ret and jpeg is not None:
-                S['frame'] = jpeg.tobytes()
-                S['frame_id'] += 1
             S['pose'] = {
                 'translation': [tx, tz, ty],
                 'orientation': [ox, oz, oy, ow],
@@ -265,8 +280,12 @@ def main():
     signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
     signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
 
-    thread = threading.Thread(target=camera_loop, daemon=True)
-    thread.start()
+    raw_queue: "Queue[np.ndarray]" = Queue(maxsize=2)
+
+    t1 = threading.Thread(target=camera_loop, args=(raw_queue,), daemon=True)
+    t2 = threading.Thread(target=encode_loop, args=(raw_queue,), daemon=True)
+    t1.start()
+    t2.start()
 
     time.sleep(2)
     app.run(host=HOST, port=PORT, threaded=True, debug=False)
