@@ -103,6 +103,16 @@ body{background:#111;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;over
     <span class="stat" id="stat-pose">pose: --</span>
     <span class="stat" id="stat-imu">imu: --</span>
     <span class="stat" id="stat-pc">pc: --</span>
+    <span class="stat" style="display:flex;align-items:center;gap:4px;font-size:12px">
+      clip:
+      <select id="clip-axis" style="background:#2a2a3a;color:#ccc;border:1px solid #444;border-radius:3px;padding:2px 4px;font-size:11px">
+        <option value="y">Y</option>
+        <option value="x">X</option>
+        <option value="z">Z</option>
+      </select>
+      <input type="range" id="clip-slider" min="-5" max="5" step="0.05" value="5" style="width:70px;accent-color:#ff9800">
+      <span id="clip-val" style="min-width:28px;font-family:monospace;font-size:11px;color:#ff9800">5.00</span>
+    </span>
     <span class="ml-auto"></span>
     <button id="btn-reset">Reset</button>
   </div>
@@ -138,6 +148,7 @@ camera.position.set(5, 4, 8);
 camera.lookAt(0, 0, 0);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.localClippingEnabled = true;
 renderer.setSize(W, H);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 scenePanel.appendChild(renderer.domElement);
@@ -179,9 +190,9 @@ const trailLine = new THREE.Line(trailGeo, trailMat);
 scene.add(trailLine);
 
 let pcObj = null;
-const pcMat = new THREE.PointsMaterial({ color: 0x33aaff, size: 0.04, sizeAttenuation: true });
+const pcMat = new THREE.PointsMaterial({ color: 0x33aaff, size: 0.04, sizeAttenuation: true, clippingPlanes: [] });
 
-function buildPointCloud(verts) {
+function buildPointCloud(verts, colors) {
   if (pcObj) { scene.remove(pcObj); pcObj.geometry.dispose(); pcObj = null; }
   if (!verts || verts.length === 0) return;
   const geo = new THREE.BufferGeometry();
@@ -192,7 +203,26 @@ function buildPointCloud(verts) {
     pos[i * 3 + 2] = verts[i][2];
   }
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  pcObj = new THREE.Points(geo, pcMat);
+
+  const useColors = colors && colors.length === verts.length;
+  if (useColors) {
+    const col = new Float32Array(colors.length * 3);
+    for (let i = 0; i < colors.length; i++) {
+      col[i * 3] = colors[i][0] / 255;
+      col[i * 3 + 1] = colors[i][1] / 255;
+      col[i * 3 + 2] = colors[i][2] / 255;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  }
+
+  const mat = new THREE.PointsMaterial({
+    vertexColors: useColors,
+    color: useColors ? undefined : 0x33aaff,
+    size: 0.04,
+    sizeAttenuation: true,
+  });
+  mat.clippingPlanes = [clipPlane];
+  pcObj = new THREE.Points(geo, mat);
   scene.add(pcObj);
 }
 
@@ -262,8 +292,41 @@ async function pollPc() {
   try {
     const r = await fetch('/pc');
     const data = await r.json();
-    if (data.vertices && data.vertices.length > 0) buildPointCloud(data.vertices);
+    if (data.vertices && data.vertices.length > 0) {
+      buildPointCloud(data.vertices, data.colors);
+    }
   } catch (e) {}
+}
+
+// Clipping plane
+const clipAxis = document.getElementById('clip-axis');
+const clipSlider = document.getElementById('clip-slider');
+const clipVal = document.getElementById('clip-val');
+let clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 5);
+let clipDirty = true;
+
+function updateClip() {
+  const axis = clipAxis.value;
+  const constVal = parseFloat(clipSlider.value);
+  clipVal.textContent = constVal.toFixed(2);
+  if (axis === 'y') clipPlane.set(new THREE.Vector3(0, -1, 0), constVal);
+  else if (axis === 'x') clipPlane.set(new THREE.Vector3(-1, 0, 0), constVal);
+  else if (axis === 'z') clipPlane.set(new THREE.Vector3(0, 0, -1), constVal);
+  clipDirty = true;
+}
+
+clipSlider.addEventListener('input', updateClip);
+clipAxis.addEventListener('change', updateClip);
+updateClip();
+
+function applyClipToMaterial(obj) {
+  if (obj && obj.material) {
+    if (Array.isArray(obj.material)) {
+      obj.material.forEach(m => m.clippingPlanes = [clipPlane]);
+    } else {
+      obj.material.clippingPlanes = [clipPlane];
+    }
+  }
 }
 
 // Settings panel
@@ -460,7 +523,12 @@ btnApplyAll.addEventListener('click', async () => {
   } catch (e) {}
 });
 
+// In the animate loop, apply clip if dirty
 function animate() {
+  if (clipDirty && pcObj) {
+    applyClipToMaterial(pcObj);
+    clipDirty = false;
+  }
   requestAnimationFrame(animate);
   controls.update();
   renderer.render(scene, camera);

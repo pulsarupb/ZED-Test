@@ -30,6 +30,7 @@ S = {
     'mapping_active': True,
     'mapping_state': 'NOT_ENABLED',
     'pc_vertices': [],
+    'pc_colors': [],
     'reset_pending': False,
     'imu': None,
     'fps': 0.0,
@@ -74,7 +75,7 @@ S = {
             'resolution': 'LOW',
             'range_meter': -1,
             'max_memory_usage': 2048,
-            'map_type': 'FUSED_POINT_CLOUD',
+            'map_type': 'MESH',
             'save_texture': False,
             'use_chunk_only': True,
             'reverse_vertex_order': False,
@@ -186,7 +187,7 @@ def path():
 @app.route('/pc')
 def pc():
     with lock:
-        return jsonify({'vertices': S['pc_vertices']})
+        return jsonify({'vertices': S['pc_vertices'], 'colors': S['pc_colors']})
 
 
 @app.route('/reset', methods=['POST'])
@@ -281,7 +282,7 @@ def _settings_descriptions():
             'resolution': 'Spatial mapping voxel resolution. LOW = faster, less detailed. HIGH = slower, more detailed mesh/point cloud.',
             'range_meter': 'Maximum mapping range in meters (-1 = auto). Longer range captures more distant geometry but uses more memory.',
             'max_memory_usage': 'Maximum memory budget for the spatial map in MB. Higher = more detail retained. Lower = chunks are recycled sooner.',
-            'map_type': 'Output representation. FUSED_POINT_CLOUD = lightweight 3D points. MESH = textured/solid surface reconstruction.',
+            'map_type': 'Output representation. MESH = colored 3D points with surface connectivity. FUSED_POINT_CLOUD = lightweight uncolored points.',
             'save_texture': 'Apply camera texture to mesh faces (MESH mode only). Produces visually rich models but increases memory and file size.',
             'use_chunk_only': 'Only process the most recently updated map chunks. Reduces CPU load during live streaming of incremental updates.',
             'reverse_vertex_order': 'Flip triangle winding for mesh faces. Needed if the mesh appears inside-out or has incorrect normals in your viewer.',
@@ -409,6 +410,7 @@ def camera_loop(raw_queue, depth_queue):
                 S['mapping_active'] = False
                 S['mapping_state'] = 'NOT_ENABLED'
                 S['pc_vertices'] = []
+                S['pc_colors'] = []
                 S['path'] = []
                 S['camera_ready'] = False
             needs_restart = False
@@ -453,7 +455,7 @@ def camera_loop(raw_queue, depth_queue):
         depth = sl.Mat()
         zpose = sl.Pose()
         sensors = sl.SensorsData()
-        fpc = sl.FusedPointCloud()
+        fpc = sl.Mesh()
         sm = _mapping_params(mapping_cfg)
         zed.enable_spatial_mapping(sm)
 
@@ -497,15 +499,10 @@ def camera_loop(raw_queue, depth_queue):
                     zed.reset_positional_tracking(sl.Transform())
                     fpc.clear()
                     S['pc_vertices'] = []
+                    S['pc_colors'] = []
                     S['path'] = []
                     S['mapping_state'] = 'NOT_ENABLED'
-                    if zed.enable_spatial_mapping(sl.SpatialMappingParameters(
-                            map_type=sl.SPATIAL_MAP_TYPE.FUSED_POINT_CLOUD,
-                            resolution=sl.MAPPING_RESOLUTION.LOW,
-                            max_memory_usage=2048,
-                            save_texture=False,
-                            use_chunk_only=True,
-                        )) <= sl.ERROR_CODE.SUCCESS:
+                    if zed.enable_spatial_mapping(_mapping_params(S['cfg']['mapping'])) <= sl.ERROR_CODE.SUCCESS:
                         S['mapping_active'] = True
                         last_pc_update = 0
 
@@ -577,14 +574,12 @@ def camera_loop(raw_queue, depth_queue):
                     ms = str(mstate).split('.')[-1] if '.' in str(mstate) else str(mstate)
                     S['mapping_state'] = ms
 
-                    if now - last_pc_update > 2.0:
-                        zed.request_spatial_map_async()
-                        last_pc_update = now
-
-                    if zed.get_spatial_map_request_status_async() <= sl.ERROR_CODE.SUCCESS:
-                        zed.retrieve_spatial_map_async(fpc)
+                    if now - last_pc_update > 3.0:
                         try:
+                            fpc.clear()
+                            zed.extract_whole_spatial_map(fpc)
                             all_verts = []
+                            all_cols = []
                             for ch in fpc.chunks:
                                 if len(ch.vertices) > 0:
                                     v = np.asarray(ch.vertices, dtype=np.float32)
@@ -593,10 +588,20 @@ def camera_loop(raw_queue, depth_queue):
                                     v_cvt[:, 1] = v[:, 2]
                                     v_cvt[:, 2] = v[:, 1]
                                     all_verts.append(v_cvt)
+                                    if len(ch.colors) > 0:
+                                        c = np.asarray(ch.colors, dtype=np.uint8)
+                                        if c.ndim == 2 and c.shape[1] >= 3:
+                                            all_cols.append(c[:, :3])
+                                        else:
+                                            all_cols.append(np.full((len(v), 3), 128, dtype=np.uint8))
+                                    else:
+                                        all_cols.append(np.full((len(v), 3), 128, dtype=np.uint8))
                             if all_verts:
                                 S['pc_vertices'] = np.concatenate(all_verts, axis=0).round(4).tolist()
-                        except:
-                            pass
+                                S['pc_colors'] = np.concatenate(all_cols, axis=0).tolist()
+                        except Exception as e:
+                            print(f"[pc] error: {e}")
+                        last_pc_update = now
 
         zed.disable_positional_tracking()
         if S['mapping_active']:

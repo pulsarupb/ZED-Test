@@ -1,8 +1,8 @@
 {
   "init": {
     "camera_resolution": "VGA",
-    "camera_fps": 100,
-    "depth_mode": "NEURAL_LIGHT",
+    "camera_fps": 60,
+    "depth_mode": "NEURAL_PLUS",
     "depth_minimum_distance": -1,
     "depth_maximum_distance": -1,
     "coordinate_units": "METER",
@@ -35,7 +35,7 @@
     "resolution": "LOW",
     "range_meter": -1,
     "max_memory_usage": 2048,
-    "map_type": "FUSED_POINT_CLOUD",
+    "map_type": "MESH",
     "save_texture": false,
     "use_chunk_only": true,
     "reverse_vertex_order": false,
