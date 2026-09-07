@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ZED 2i SLAM Test</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script type="importmap">
 {
   "imports": {
@@ -23,7 +25,7 @@ body{background:#111;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;over
 .status-dot.yellow{background:#ff9800}
 .status-dot.red{background:#f44336}
 .status-dot.gray{background:#666}
-#main{display:grid;grid-template-columns:2fr 2fr 3fr;gap:0;overflow:hidden}
+#main{display:grid;grid-template-columns:2fr 2fr 3fr 3fr;gap:0;overflow:hidden}
 #video-panel{position:relative;background:#000;overflow:hidden}
 #video-panel img{width:100%;height:100%;object-fit:contain}
 #video-overlay{position:absolute;bottom:8px;left:8px;font-size:12px;font-family:monospace;background:rgba(0,0,0,0.7);padding:6px 10px;border-radius:4px;pointer-events:none}
@@ -32,6 +34,10 @@ body{background:#111;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;over
 #depth-overlay{position:absolute;bottom:8px;left:8px;font-size:12px;font-family:monospace;background:rgba(0,0,0,0.7);padding:6px 10px;border-radius:4px;pointer-events:none}
 #scene-panel{position:relative;background:#1a1a1a;overflow:hidden}
 #scene-panel canvas{display:block}
+#map-panel{position:relative;z-index:0;background:#333;overflow:hidden}
+#map-panel .leaflet-container{background:#222}
+#map-panel .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9)}
+#geo-overlay{position:absolute;bottom:8px;left:8px;font-size:11px;font-family:monospace;background:rgba(0,0,0,0.7);padding:4px 8px;border-radius:4px;pointer-events:none;z-index:1000}
 #bottombar{background:#1a1a2e;padding:8px 16px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;font-size:13px;font-family:monospace}
 #bottombar .stat{white-space:nowrap}
 #bottombar button{padding:6px 14px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600}
@@ -40,9 +46,9 @@ body{background:#111;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;over
 #gear-btn{background:none;border:none;color:#aaa;font-size:20px;cursor:pointer;padding:2px 8px;border-radius:4px}
 #gear-btn:hover{color:#fff;background:rgba(255,255,255,0.1)}
 .ml-auto{margin-left:auto}
-.settings-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:99;display:none}
+.settings-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1100;display:none}
 .settings-overlay.open{display:block}
-#settings-panel{position:fixed;top:0;right:-420px;width:400px;height:100%;background:#1e1e2e;z-index:100;overflow-y:auto;transition:right .3s ease;border-left:1px solid #333}
+#settings-panel{position:fixed;top:0;right:-420px;width:400px;height:100%;background:#1e1e2e;z-index:1200;overflow-y:auto;transition:right .3s ease;border-left:1px solid #333}
 #settings-panel.open{right:0}
 #settings-panel .header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #333;position:sticky;top:0;background:#1e1e2e;z-index:2}
 #settings-panel .header h2{font-size:15px;font-weight:600}
@@ -77,7 +83,7 @@ body{background:#111;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;over
 .ctrl-row .switch .slider::before{content:"";position:absolute;height:14px;width:14px;left:2px;bottom:2px;background:#ccc;border-radius:50%;transition:.2s}
 .ctrl-row .switch input:checked+.slider{background:#4caf50}
 .ctrl-row .switch input:checked+.slider::before{transform:translateX(18px)}
-@media(max-width:1000px){ #main{grid-template-columns:1fr;grid-template-rows:1fr 1fr 1fr}}
+@media(max-width:1000px){ #main{grid-template-columns:1fr;grid-template-rows:1fr 1fr 1fr 1fr}}
 </style>
 </head>
 <body>
@@ -98,9 +104,13 @@ body{background:#111;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;over
       <div id="depth-overlay">depth (0–5m)</div>
     </div>
     <div id="scene-panel"></div>
+    <div id="map-panel">
+      <div id="geo-overlay">geo: waiting for fix...</div>
+    </div>
   </div>
   <div id="bottombar">
     <span class="stat" id="stat-pose">pose: --</span>
+    <span class="stat" id="stat-geo">geo: --</span>
     <span class="stat" id="stat-imu">imu: --</span>
     <span class="stat" id="stat-pc">pc: --</span>
     <span class="stat" style="display:flex;align-items:center;gap:4px;font-size:12px">
@@ -114,6 +124,10 @@ body{background:#111;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;over
       <span id="clip-val" style="min-width:28px;font-family:monospace;font-size:11px;color:#ff9800">5.00</span>
     </span>
     <span class="ml-auto"></span>
+    <span class="stat" style="display:flex;align-items:center;gap:6px;font-size:12px">
+      <label for="fuse-toggle" style="cursor:pointer">fused trail</label>
+      <input type="checkbox" id="fuse-toggle" style="accent-color:#00ff88;cursor:pointer">
+    </span>
     <button id="btn-reset">Reset</button>
   </div>
 </div>
@@ -242,9 +256,11 @@ const videoOverlay = document.getElementById('video-overlay');
 const topStatus = document.getElementById('top-status');
 const cameraInfo = document.getElementById('camera-info');
 const statPose = document.getElementById('stat-pose');
+const statGeo = document.getElementById('stat-geo');
 const statImu = document.getElementById('stat-imu');
 const statPc = document.getElementById('stat-pc');
 const btnReset = document.getElementById('btn-reset');
+const fuseToggle = document.getElementById('fuse-toggle');
 
 btnReset.addEventListener('click', () => fetch('/reset', { method: 'POST' }));
 
@@ -261,6 +277,20 @@ function updateUI(data) {
     const t = data.pose.translation;
     statPose.textContent = 'pose: x:' + t[0].toFixed(2) + ' y:' + t[1].toFixed(2) + ' z:' + t[2].toFixed(2);
   }
+  const geoOv = document.getElementById('geo-overlay');
+  if (data.geopose) {
+    const g = data.geopose;
+    statGeo.textContent = 'geo: ' + g.lat.toFixed(6) + ',' + g.lon.toFixed(6) + ' | yaw ' + ((g.heading * 180 / Math.PI) % 360).toFixed(0) + '\u00b0 | ' + data.fusion_status;
+    geoOv.textContent = 'fused geo | fusion: ' + data.fusion_status +
+      (data.calibration_std ? ' | yaw_std ' + data.calibration_std.yaw_std.toFixed(4) + ' rad' : '');
+  } else if (data.gnss_fix) {
+    const f = data.gnss_fix;
+    statGeo.textContent = 'geo: ' + f.lat.toFixed(6) + ',' + f.lon.toFixed(6) + ' | ' + f.fix + ' | ' + data.fusion_status;
+    geoOv.textContent = 'raw gnss | fix: ' + f.fix + ' | sats ' + f.sats + ' | fusion: ' + data.fusion_status;
+  } else {
+    statGeo.textContent = 'geo: --';
+    geoOv.textContent = 'geo: waiting for fix...';
+  }
   if (data.imu) {
     const a = data.imu.acceleration, g = data.imu.angular_velocity;
     statImu.textContent = 'imu: a:[' + a[0].toFixed(1) + ',' + a[1].toFixed(1) + ',' + a[2].toFixed(1) + '] g:[' + g[0].toFixed(1) + ',' + g[1].toFixed(1) + ',' + g[2].toFixed(1) + ']';
@@ -274,9 +304,11 @@ async function pollStatus() {
     const r = await fetch('/status');
     const data = await r.json();
     updateUI(data);
-    if (data.pose) {
-      camGroup.position.set(data.pose.translation[0], data.pose.translation[1], data.pose.translation[2]);
-      camGroup.quaternion.set(data.pose.orientation[0], data.pose.orientation[1], data.pose.orientation[2], data.pose.orientation[3]);
+    const useFused = fuseToggle.checked && data.fused_pose;
+    const pose = useFused ? data.fused_pose : data.pose;
+    if (pose) {
+      camGroup.position.set(pose.translation[0], pose.translation[1], pose.translation[2]);
+      camGroup.quaternion.set(pose.orientation[0], pose.orientation[1], pose.orientation[2], pose.orientation[3]);
       camGroup.updateMatrix();
     }
     if (data.restart_pending) document.getElementById('settings-restart-msg').style.display = 'block';
@@ -398,6 +430,15 @@ function buildControl(section, key, value, options, description) {
     sl.className = 'slider';
     sw.appendChild(sl);
     control.appendChild(sw);
+  } else if (options === 'text') {
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.value = value;
+    inp.style.background = '#2a2a3a'; inp.style.color = '#ccc';
+    inp.style.border = '1px solid #444'; inp.style.borderRadius = '3px';
+    inp.style.padding = '3px 6px'; inp.style.fontSize = '12px'; inp.style.width = '180px';
+    inp.addEventListener('change', () => onControlChange(section, key, inp.value));
+    control.appendChild(inp);
   } else if (Array.isArray(options)) {
     const sel = document.createElement('select');
     options.forEach(opt => {
@@ -459,8 +500,8 @@ async function loadSettings() {
 
 function renderSettings() {
   settingsBody.innerHTML = '';
-  const sectionLabels = { init: 'Camera Init', runtime: 'Runtime', tracking: 'Tracking', mapping: 'Mapping' };
-  const sectionOrder = ['init', 'runtime', 'tracking', 'mapping'];
+  const sectionLabels = { init: 'Camera Init', runtime: 'Runtime', tracking: 'Tracking', mapping: 'Mapping', gnss: 'GNSS / RTK Fusion' };
+  const sectionOrder = ['init', 'runtime', 'tracking', 'mapping', 'gnss'];
 
   sectionOrder.forEach(section => {
     const opts = settingsOptions[section];
@@ -544,11 +585,67 @@ function onResize() {
 
 window.addEventListener('resize', onResize);
 
+// ---- Leaflet map ----
+let map = null;
+let fusedLine = null;
+let rawLine = null;
+let camMarker = null;
+let mapCentered = false;
+
+function initMap() {
+  const mapPanel = document.getElementById('map-panel');
+  if (!mapPanel || typeof L === 'undefined') return;
+  map = L.map('map-panel', { zoomControl: false }).setView([0, 0], 2);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap',
+  }).addTo(map);
+  fusedLine = L.polyline([], { color: '#00ff88', weight: 3 }).addTo(map);
+  rawLine = L.polyline([], { color: '#888', weight: 2, dashArray: '4 4' }).addTo(map);
+  camMarker = L.marker([0, 0]).addTo(map);
+  setTimeout(() => map.invalidateSize(), 100);
+}
+
+async function pollGeo() {
+  if (!map) return;
+  try {
+    const r = await fetch('/geopath');
+    const path = await r.json();
+    const fused = [], raw = [];
+    path.forEach(p => {
+      if (p.type === 'fused') fused.push([p.lat, p.lon]);
+      else raw.push([p.lat, p.lon]);
+    });
+    if (raw.length) rawLine.setLatLngs(raw);
+    if (fused.length) {
+      fusedLine.setLatLngs(fused);
+      if (!mapCentered) {
+        const last = fused[fused.length - 1];
+        map.setView(last, 18);
+        mapCentered = true;
+      }
+      const last = fused[fused.length - 1];
+      camMarker.setLatLng(last);
+      if (path.length && path[path.length - 1].heading !== undefined) {
+        const deg = (path[path.length - 1].heading * 180 / Math.PI) % 360;
+        camMarker.setIcon(L.divIcon({
+          className: '',
+          html: '<div style="width:16px;height:16px;border:2px solid #00ff88;border-radius:50%;position:relative"></div>',
+          iconSize: [16, 16],
+        }));
+      }
+    }
+  } catch (e) {}
+}
+
 setInterval(pollStatus, 500);
 setInterval(pollPath, 1000);
 setInterval(pollPc, 2000);
+setInterval(pollGeo, 1000);
 pollStatus();
 pollPath();
+pollGeo();
+initMap();
 animate();
 </script>
 </body>

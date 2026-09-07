@@ -40,5 +40,16 @@
     "use_chunk_only": true,
     "reverse_vertex_order": false,
     "stability_counter": 0
+  },
+  "gnss": {
+    "enabled": true,
+    "port": "/dev/ttyACM0",
+    "baud": 115200,
+    "antenna_position": "0,0,0",
+    "enable_reinitialization": true,
+    "enable_rolling_calibration": true,
+    "target_yaw_uncertainty": 0.1,
+    "gnss_vio_reinit_threshold": 5,
+    "target_translation_uncertainty": 0.1
   }
 }

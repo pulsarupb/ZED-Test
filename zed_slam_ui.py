@@ -12,9 +12,12 @@ import numpy as np
 import pyzed.sl as sl
 from flask import Flask, Response, render_template, jsonify, request
 
+from rtk_gps import GNSSReader, GPSFix
+
 HOST = '0.0.0.0'
 PORT = 5000
 MAX_PATH = 3000
+MAX_GEO_PATH = 2000
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), 'settings.json')
 
 lock = threading.Lock()
@@ -25,6 +28,7 @@ S = {
     'depth_frame': None,
     'depth_frame_id': 0,
     'pose': None,
+    'fused_pose': None,
     'path': [],
     'tracking_state': 'OFF',
     'mapping_active': True,
@@ -38,6 +42,13 @@ S = {
     'camera_model': '',
     'serial': '',
     'settings_restart_pending': False,
+    'gnss_ready': False,
+    'gnss_fix': None,
+    'geopose': None,
+    'fusion_status': 'OFF',
+    'fusion_active': False,
+    'calibration_std': None,
+    'geo_path': [],
     'cfg': {
         'init': {
             'camera_resolution': 'VGA',
@@ -81,6 +92,17 @@ S = {
             'reverse_vertex_order': False,
             'stability_counter': 0,
         },
+        'gnss': {
+            'enabled': False,
+            'port': '/dev/ttyACM0',
+            'baud': 115200,
+            'antenna_position': [0, 0, 0],
+            'enable_reinitialization': True,
+            'enable_rolling_calibration': True,
+            'target_yaw_uncertainty': 0.1,
+            'gnss_vio_reinit_threshold': 5.0,
+            'target_translation_uncertainty': 0.1,
+        },
     },
 }
 
@@ -105,7 +127,7 @@ def load_settings():
         print(f"[settings] load failed: {e}")
         return
     with lock:
-        for section in ('init', 'runtime', 'tracking', 'mapping'):
+        for section in ('init', 'runtime', 'tracking', 'mapping', 'gnss'):
             if section in saved:
                 for key, value in saved[section].items():
                     if key in S['cfg'].get(section, {}):
@@ -175,7 +197,19 @@ def status():
             'serial': S['serial'],
             'path_length': len(S['path']),
             'restart_pending': S['settings_restart_pending'],
+            'gnss_ready': S['gnss_ready'],
+            'gnss_fix': S['gnss_fix'],
+            'geopose': S['geopose'],
+            'fusion_status': S['fusion_status'],
+            'fusion_active': S['fusion_active'],
+            'calibration_std': S['calibration_std'],
         })
+
+
+@app.route('/geopath')
+def geopath():
+    with lock:
+        return jsonify(S['geo_path'])
 
 
 @app.route('/path')
@@ -241,6 +275,17 @@ def _settings_options():
             'reverse_vertex_order': 'bool',
             'stability_counter': {'min': 0, 'max': 100, 'step': 1},
         },
+        'gnss': {
+            'enabled': 'bool',
+            'port': 'text',
+            'baud': [4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800],
+            'antenna_position': 'text',
+            'enable_reinitialization': 'bool',
+            'enable_rolling_calibration': 'bool',
+            'target_yaw_uncertainty': {'min': 0.001, 'max': 0.5, 'step': 0.001},
+            'gnss_vio_reinit_threshold': {'min': 1, 'max': 20, 'step': 1},
+            'target_translation_uncertainty': {'min': 0.01, 'max': 1.0, 'step': 0.01},
+        },
     }
 
 
@@ -288,6 +333,17 @@ def _settings_descriptions():
             'reverse_vertex_order': 'Flip triangle winding for mesh faces. Needed if the mesh appears inside-out or has incorrect normals in your viewer.',
             'stability_counter': 'Number of observations before a voxel is locked (0 = instant). Higher values reduce noise but delay map convergence.',
         },
+        'gnss': {
+            'enabled': 'Fuse external GNSS/RTK data with VIO using the Global Localization (Fusion) module. Requires a ZED camera with IMU. Restarts the camera pipeline.',
+            'port': 'Serial port of the GNSS/RTK receiver (e.g. /dev/ttyACM0).',
+            'baud': 'Serial baud rate of the GNSS receiver.',
+            'antenna_position': 'Position of the GNSS antenna relative to the camera, as "x,y,z" in meters.',
+            'enable_reinitialization': 'Re-align GNSS/VIO when a large drift is detected after a GNSS outage.',
+            'enable_rolling_calibration': 'Use a rough calibration first, then refine online for faster fused position.',
+            'target_yaw_uncertainty': 'Yaw uncertainty (rad) at which VIO/GNSS calibration is considered complete.',
+            'gnss_vio_reinit_threshold': 'Threshold (x GNSS covariance) above which a reinitialization is triggered.',
+            'target_translation_uncertainty': 'Translation uncertainty (m) at which calibration completes when enabled.',
+        },
     }
 
 
@@ -303,12 +359,12 @@ def settings():
     data = request.get_json(force=True)
     needs_restart = False
     with lock:
-        for section in ('init', 'runtime', 'tracking', 'mapping'):
+        for section in ('init', 'runtime', 'tracking', 'mapping', 'gnss'):
             if section not in data:
                 continue
             for key, value in data[section].items():
                 if key in S['cfg'].get(section, {}):
-                    if section in ('init', 'tracking', 'mapping'):
+                    if section in ('init', 'tracking', 'mapping', 'gnss'):
                         needs_restart = True
                     S['cfg'][section][key] = value
         if needs_restart:
@@ -318,6 +374,136 @@ def settings():
 
 
 zed = None
+gnss_reader = None
+
+
+def _gnss_cfg():
+    with lock:
+        return dict(S['cfg']['gnss'])
+
+
+def _start_gnss(on_fix):
+    global gnss_reader
+    cfg = _gnss_cfg()
+    if not cfg['enabled']:
+        return None
+    if gnss_reader is not None:
+        try:
+            gnss_reader.stop()
+        except Exception:
+            pass
+    gnss_reader = GNSSReader(cfg['port'], cfg['baud'], 3.0, on_fix=on_fix)
+    gnss_reader.start()
+    return gnss_reader
+
+
+def _stop_gnss():
+    global gnss_reader
+    if gnss_reader is not None:
+        try:
+            gnss_reader.stop()
+        except Exception:
+            pass
+    gnss_reader = None
+    with lock:
+        S['gnss_ready'] = False
+        S['fusion_active'] = False
+
+
+def _antenna_position(cfg):
+    pos = cfg.get('antenna_position', [0, 0, 0])
+    try:
+        if isinstance(pos, str):
+            vals = [float(x.strip()) for x in pos.split(',')]
+        else:
+            vals = [float(x) for x in pos]
+    except Exception:
+        vals = [0.0, 0.0, 0.0]
+    while len(vals) < 3:
+        vals.append(0.0)
+    return vals[:3]
+
+
+def _fix_to_gnss_data(fix: GPSFix):
+    gd = sl.GNSSData()
+    gd.set_coordinates(fix.lat, fix.lon, fix.alt_msl, False)
+    gd.latitude_std = fix.latitude_std
+    gd.longitude_std = fix.longitude_std
+    gd.altitude_std = fix.altitude_std
+
+    q = fix.fix_quality
+    if q == 4:
+        gd.gnss_status = sl.GNSS_STATUS.RTK_FIX.value
+        gd.gnss_mode = sl.GNSS_MODE.FIX_3D.value
+    elif q == 5:
+        gd.gnss_status = sl.GNSS_STATUS.RTK_FLOAT.value
+        gd.gnss_mode = sl.GNSS_MODE.FIX_3D.value
+    elif q == 2:
+        gd.gnss_status = sl.GNSS_STATUS.DGNSS.value
+        gd.gnss_mode = sl.GNSS_MODE.FIX_3D.value
+    elif q >= 1:
+        gd.gnss_status = sl.GNSS_STATUS.SINGLE.value
+        gd.gnss_mode = sl.GNSS_MODE.FIX_3D.value
+    else:
+        gd.gnss_status = sl.GNSS_STATUS.UNKNOWN.value
+        gd.gnss_mode = sl.GNSS_MODE.NO_FIX.value
+
+    eph = max(fix.latitude_std, fix.longitude_std)
+    epv = fix.altitude_std
+    gd.position_covariances = [
+        eph * eph, 0.0, 0.0,
+        0.0, eph * eph, 0.0,
+        0.0, 0.0, epv * epv,
+    ]
+
+    ts = sl.Timestamp()
+    ts.set_microseconds(int(fix.unix_time * 1_000_000))
+    gd.ts = ts
+    return gd
+
+
+def _build_fusion(cfg):
+    fusion = sl.Fusion()
+    init_fusion_param = sl.InitFusionParameters()
+    init_fusion_param.coordinate_units = sl.UNIT.METER
+    init_fusion_param.coordinate_system = getattr(
+        sl.COORDINATE_SYSTEM, cfg['init']['coordinate_system'])
+    init_fusion_param.verbose = True
+    code = fusion.init(init_fusion_param)
+    if code != sl.FUSION_ERROR_CODE.SUCCESS:
+        print(f"[fusion] init failed: {code}")
+        return None
+
+    uuid = sl.CameraIdentifier(zed.get_camera_information().serial_number)
+    configuration = sl.CommunicationParameters()
+    configuration.set_for_shared_memory()
+    sub = fusion.subscribe(uuid, configuration, sl.Transform())
+    if sub != sl.FUSION_ERROR_CODE.SUCCESS:
+        print(f"[fusion] subscribe failed: {sub}")
+        fusion.close()
+        return None
+
+    ptf = sl.PositionalTrackingFusionParameters()
+    ptf.enable_GNSS_fusion = True
+    cal = sl.GNSSCalibrationParameters()
+    cal.enable_reinitialization = cfg['gnss']['enable_reinitialization']
+    cal.enable_rolling_calibration = cfg['gnss']['enable_rolling_calibration']
+    cal.enable_translation_uncertainty_target = False
+    cal.target_yaw_uncertainty = float(cfg['gnss']['target_yaw_uncertainty'])
+    cal.gnss_vio_reinit_threshold = float(cfg['gnss']['gnss_vio_reinit_threshold'])
+    cal.target_translation_uncertainty = float(cfg['gnss']['target_translation_uncertainty'])
+    cal.gnss_antenna_position = np.array(_antenna_position(cfg['gnss']), dtype=np.float64)
+    ptf.gnss_calibration_parameters = cal
+
+    code = fusion.enable_positionnal_tracking(ptf)
+    if code != sl.FUSION_ERROR_CODE.SUCCESS:
+        print(f"[fusion] enable tracking failed: {code}")
+        fusion.close()
+        return None
+
+    with lock:
+        S['fusion_active'] = True
+    return fusion
 
 
 def _init_params(cfg):
@@ -412,6 +598,11 @@ def camera_loop(raw_queue, depth_queue):
                 S['pc_vertices'] = []
                 S['pc_colors'] = []
                 S['path'] = []
+                S['geo_path'] = []
+                S['fused_pose'] = None
+                S['geopose'] = None
+                S['gnss_fix'] = None
+                S['calibration_std'] = None
                 S['camera_ready'] = False
             needs_restart = False
             if zed is not None:
@@ -422,7 +613,9 @@ def camera_loop(raw_queue, depth_queue):
                 except:
                     pass
             zed = None
+            _stop_gnss()
             time.sleep(0.5)
+
 
         with lock:
             if not S['running']:
@@ -465,6 +658,42 @@ def camera_loop(raw_queue, depth_queue):
             S['camera_model'] = str(cam_info.camera_model)
             S['serial'] = str(cam_info.serial_number)
             S['mapping_active'] = True
+
+        # --- Global localization (GNSS/VIO fusion) ---
+        fusion = None
+        gnss_on_fix = None
+        if _gnss_cfg()['enabled']:
+            def gnss_on_fix(fix):
+                try:
+                    gd = _fix_to_gnss_data(fix)
+                    fusion.ingest_gnss_data(gd)
+                    with lock:
+                        S['gnss_ready'] = True
+                        S['gnss_fix'] = {
+                            'lat': fix.lat,
+                            'lon': fix.lon,
+                            'alt': fix.alt_msl,
+                            'fix': fix.fix_name,
+                            'quality': fix.fix_quality,
+                            'sats': fix.num_sats,
+                            'hdop': round(fix.hdop, 2),
+                        }
+                except Exception as e:
+                    print(f"[fusion] ingest error: {e}", flush=True)
+            _start_gnss(gnss_on_fix)
+            fusion = _build_fusion(dict(S['cfg']))
+            if fusion is None:
+                print("[fusion] Fusion unavailable, continuing without GNSS fusion")
+                with lock:
+                    S['fusion_active'] = False
+                    S['fusion_status'] = 'OFF'
+            else:
+                with lock:
+                    S['fusion_status'] = 'CALIBRATION_IN_PROGRESS'
+        else:
+            with lock:
+                S['fusion_active'] = False
+                S['fusion_status'] = 'OFF'
 
         frame_count = 0
         fps_timer = time.time()
@@ -509,6 +738,54 @@ def camera_loop(raw_queue, depth_queue):
             if zed.grab(runtime) > sl.ERROR_CODE.SUCCESS:
                 time.sleep(0.001)
                 continue
+
+            if fusion is not None:
+                try:
+                    if fusion.process() == sl.FUSION_ERROR_CODE.SUCCESS:
+                        fused_pose = sl.Pose()
+                        fusion.get_position(fused_pose)
+                        ftrans = fused_pose.get_translation().get()
+                        forient = fused_pose.get_orientation().get()
+                        with lock:
+                            S['fused_pose'] = {
+                                'translation': [float(ftrans[0]), float(ftrans[2]), float(ftrans[1])],
+                                'orientation': [float(forient[0]), float(forient[2]), float(forient[1]), float(forient[3])],
+                            }
+                        geopose = sl.GeoPose()
+                        gp_status = fusion.get_geo_pose(geopose)
+                        with lock:
+                            S['fusion_status'] = str(gp_status).split('.')[-1]
+                        if gp_status == sl.GNSS_FUSION_STATUS.OK:
+                            ll = geopose.latlng_coordinates
+                            lat, lon, alt = ll.get_coordinates(False)
+                            heading_deg = float(geopose.heading)
+                            geopose_out = {
+                                'lat': lat,
+                                'lon': lon,
+                                'alt': alt,
+                                'heading': heading_deg,
+                                'horizontal_accuracy': float(geopose.horizontal_accuracy),
+                                'vertical_accuracy': float(geopose.vertical_accuracy),
+                            }
+                            with lock:
+                                S['geopose'] = geopose_out
+                                S['geo_path'].append({
+                                    'type': 'fused',
+                                    'lat': lat,
+                                    'lon': lon,
+                                    'alt': alt,
+                                    'heading': heading_deg,
+                                })
+                                if len(S['geo_path']) > MAX_GEO_PATH:
+                                    S['geo_path'] = S['geo_path'][-MAX_GEO_PATH:]
+                        cal_status, yaw_std, pos_std = fusion.get_current_gnss_calibration_std()
+                        with lock:
+                            S['calibration_std'] = {
+                                'yaw_std': float(yaw_std),
+                                'position_std': [float(x) for x in np.asarray(pos_std).ravel()[:3]],
+                            }
+                except Exception as e:
+                    print(f"[fusion] process error: {e}", flush=True)
 
             zed.retrieve_image(image, sl.VIEW.LEFT)
             try:
@@ -603,6 +880,16 @@ def camera_loop(raw_queue, depth_queue):
                             print(f"[pc] error: {e}")
                         last_pc_update = now
 
+        if fusion is not None:
+            try:
+                fusion.close()
+            except Exception as e:
+                print(f"[fusion] close error: {e}")
+            fusion = None
+            with lock:
+                S['fusion_active'] = False
+                S['fusion_status'] = 'OFF'
+        _stop_gnss()
         zed.disable_positional_tracking()
         if S['mapping_active']:
             zed.disable_spatial_mapping()
