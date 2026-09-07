@@ -8,3 +8,8 @@ dependencies = [
     "opencv-python>=4.8.0",
     "numpy>=1.21,<2",
 ]
+
+# NOTE: pyzed is installed by the ZED SDK installer into the user
+# site-packages (~/.local/lib/python3.10/site-packages) and is not on PyPI.
+# uv only sees it if the venv was created with system site-packages. Recreate
+# with:  rm -rf .venv && uv venv --system-site-packages && uv sync
