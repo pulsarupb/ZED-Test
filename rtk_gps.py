@@ -100,7 +100,11 @@ class GNSSReader:
                 print(f"[gnss] Connected to {self.port} @ {self.baud} baud", flush=True)
                 return ser
             except SerialException as e:
-                print(f"[gnss] Port {self.port} unavailable ({e}). "
+                # Hint for common Jetson pitfalls: dialout group or ModemManager
+                hint = ""
+                if "Permission denied" in str(e):
+                    hint = " (hint: user not in 'dialout' group or needs re-login; try 'sudo usermod -aG dialout $USER' then logout, or 'newgrp dialout'; also check ModemManager: 'sudo systemctl stop ModemManager' or add udev rule ENV{ID_MM_DEVICE_IGNORE}=\"1\")"
+                print(f"[gnss] Port {self.port} unavailable ({e}){hint}. "
                       f"Retrying in {self.retry_delay}s...", flush=True)
                 self._stop.wait(self.retry_delay)
         raise SerialException("stopped")

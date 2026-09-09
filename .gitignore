@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# ZED diagnostics (local)
+ZED_Diagnostic_Results.json
+
+# OS
+.DS_Store

@@ -2,7 +2,7 @@
   "init": {
     "camera_resolution": "VGA",
     "camera_fps": 60,
-    "depth_mode": "NEURAL_PLUS",
+    "depth_mode": "NEURAL_LIGHT",
     "depth_minimum_distance": -1,
     "depth_maximum_distance": -1,
     "coordinate_units": "METER",

@@ -479,7 +479,7 @@ def _build_fusion(cfg):
     configuration.set_for_shared_memory()
     sub = fusion.subscribe(uuid, configuration, sl.Transform())
     if sub != sl.FUSION_ERROR_CODE.SUCCESS:
-        print(f"[fusion] subscribe failed: {sub}")
+        print(f"[fusion] subscribe failed: {sub} — if MEMORY ALREADY USED, a previous Fusion instance is still holding shared memory (kill old zed_slam_ui.py or remove /dev/shm/zed_* and retry)")
         fusion.close()
         return None
 
@@ -539,7 +539,7 @@ def _tracking_params(cfg):
 
 
 def _mapping_params(cfg):
-    return sl.SpatialMappingParameters(
+    p = sl.SpatialMappingParameters(
         map_type=getattr(sl.SPATIAL_MAP_TYPE, cfg['map_type']),
         resolution=getattr(sl.MAPPING_RESOLUTION, cfg['resolution']),
         max_memory_usage=cfg['max_memory_usage'],
@@ -547,6 +547,16 @@ def _mapping_params(cfg):
         use_chunk_only=cfg['use_chunk_only'],
         reverse_vertex_order=cfg['reverse_vertex_order'],
     )
+    # Additional params not in constructor in newer SDK — set explicitly
+    # cfg['range_meter']: -1 = auto; otherwise set via set_range
+    try:
+        if cfg.get('range_meter', -1) != -1:
+            p.set_range(float(cfg['range_meter']))
+        if 'stability_counter' in cfg:
+            p.stability_counter = int(cfg['stability_counter'])
+    except Exception as e:
+        print(f"[mapping] extra params warning: {e}")
+    return p
 
 
 def encode_loop(raw_queue):
@@ -556,7 +566,7 @@ def encode_loop(raw_queue):
                 break
         try:
             img = raw_queue.get(timeout=1.0)
-        except:
+        except Exception:
             continue
         if img.shape[2] == 4:
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
@@ -576,7 +586,7 @@ def encode_depth_loop(depth_queue):
                 break
         try:
             img = depth_queue.get(timeout=1.0)
-        except:
+        except Exception:
             continue
         ret, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 60])
         if ret:
@@ -631,13 +641,13 @@ def camera_loop(raw_queue, depth_queue):
 
         zed = sl.Camera()
         err = zed.open(_init_params(init_cfg))
-        if err > sl.ERROR_CODE.SUCCESS:
+        if err != sl.ERROR_CODE.SUCCESS:
             print(f"[cam] open failed: {err}, retrying in 2s")
             time.sleep(2)
             continue
 
         err = zed.enable_positional_tracking(_tracking_params(tracking_cfg))
-        if err > sl.ERROR_CODE.SUCCESS:
+        if err != sl.ERROR_CODE.SUCCESS:
             print(f"[cam] tracking enable failed: {err}, retrying in 2s")
             zed.close()
             time.sleep(2)
@@ -661,12 +671,15 @@ def camera_loop(raw_queue, depth_queue):
 
         # --- Global localization (GNSS/VIO fusion) ---
         fusion = None
+        fusion_holder = [None]  # mutable holder so callback sees updated fusion
         gnss_on_fix = None
         if _gnss_cfg()['enabled']:
             def gnss_on_fix(fix):
                 try:
+                    if fusion_holder[0] is None:
+                        return
                     gd = _fix_to_gnss_data(fix)
-                    fusion.ingest_gnss_data(gd)
+                    fusion_holder[0].ingest_gnss_data(gd)
                     with lock:
                         S['gnss_ready'] = True
                         S['gnss_fix'] = {
@@ -682,6 +695,7 @@ def camera_loop(raw_queue, depth_queue):
                     print(f"[fusion] ingest error: {e}", flush=True)
             _start_gnss(gnss_on_fix)
             fusion = _build_fusion(dict(S['cfg']))
+            fusion_holder[0] = fusion
             if fusion is None:
                 print("[fusion] Fusion unavailable, continuing without GNSS fusion")
                 with lock:
@@ -731,11 +745,11 @@ def camera_loop(raw_queue, depth_queue):
                     S['pc_colors'] = []
                     S['path'] = []
                     S['mapping_state'] = 'NOT_ENABLED'
-                    if zed.enable_spatial_mapping(_mapping_params(S['cfg']['mapping'])) <= sl.ERROR_CODE.SUCCESS:
+                    if zed.enable_spatial_mapping(_mapping_params(S['cfg']['mapping'])) == sl.ERROR_CODE.SUCCESS:
                         S['mapping_active'] = True
                         last_pc_update = 0
 
-            if zed.grab(runtime) > sl.ERROR_CODE.SUCCESS:
+            if zed.grab(runtime) != sl.ERROR_CODE.SUCCESS:
                 time.sleep(0.001)
                 continue
 
@@ -811,16 +825,16 @@ def camera_loop(raw_queue, depth_queue):
             orient = zpose.get_orientation().get()
 
             imu_data = None
-            if zed.get_sensors_data(sensors, sl.TIME_REFERENCE.IMAGE) <= sl.ERROR_CODE.SUCCESS:
+            if zed.get_sensors_data(sensors, sl.TIME_REFERENCE.IMAGE) == sl.ERROR_CODE.SUCCESS:
                 imu = sensors.get_imu_data()
-                acc = [0, 0, 0]
-                imu.get_linear_acceleration(acc)
-                ang = [0, 0, 0]
-                imu.get_angular_velocity(ang)
-                imu_data = {
-                    'acceleration': [round(float(acc[0]), 2), round(float(acc[1]), 2), round(float(acc[2]), 2)],
-                    'angular_velocity': [round(float(ang[0]), 2), round(float(ang[1]), 2), round(float(ang[2]), 2)],
-                }
+                # is_available is a bool property, not callable
+                if imu.is_available:
+                    acc = imu.get_linear_acceleration()
+                    ang = imu.get_angular_velocity()
+                    imu_data = {
+                        'acceleration': [round(float(acc[0]), 2), round(float(acc[1]), 2), round(float(acc[2]), 2)],
+                        'angular_velocity': [round(float(ang[0]), 2), round(float(ang[1]), 2), round(float(ang[2]), 2)],
+                    }
 
             frame_count += 1
             if now - fps_timer >= 1.0:
@@ -897,9 +911,22 @@ def camera_loop(raw_queue, depth_queue):
         zed = None
 
 
+def _handle_exit(signum, frame):
+    print(f"[main] signal {signum}, shutting down...")
+    with lock:
+        S['running'] = False
+    _stop_gnss()
+    try:
+        if zed is not None:
+            zed.close()
+    except Exception:
+        pass
+    sys.exit(0)
+
+
 def main():
-    signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
-    signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
+    signal.signal(signal.SIGINT, _handle_exit)
+    signal.signal(signal.SIGTERM, _handle_exit)
 
     load_settings()
 
